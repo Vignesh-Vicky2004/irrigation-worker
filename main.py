@@ -1,37 +1,25 @@
-import os
-import json
 import firebase_admin
 from firebase_admin import credentials, db
 import joblib
 import numpy as np
 from datetime import datetime
-from dotenv import load_dotenv
-load_dotenv()
-import os
 
-# 🔐 Step 1: Load Firebase key from ENV variable
-FIREBASE_KEY_JSON = os.environ.get("FIREBASE_KEY_JSON")
+# 🔄 Step 1: Initialize Firebase from secret file injected by Render
+FIREBASE_KEY_PATH = "/opt/render/project/src/firebase_key.json"
 
-if not FIREBASE_KEY_JSON:
-    raise Exception("FIREBASE_KEY_JSON not found in environment variables")
+cred = credentials.Certificate(FIREBASE_KEY_PATH)
+firebase_admin.initialize_app(cred, {
+    'databaseURL': 'https://agri-hub-544be-default-rtdb.firebaseio.com'
+})
 
-with open("firebase_key.json", "w") as f:
-    f.write(FIREBASE_KEY_JSON)
-
-# 🔄 Step 2: Initialize Firebase
-if not firebase_admin._apps:
-    cred = credentials.Certificate("firebase_key.json")
-    firebase_admin.initialize_app(cred, {
-        'databaseURL': 'https://agri-hub-544be-default-rtdb.firebaseio.com'
-    })
-
-# 📦 Step 3: Load model
+# 📦 Step 2: Load model artifacts
 MODEL_PATH = "tamil_nadu_irrigation_model.pkl"
 artifacts = joblib.load(MODEL_PATH)
 model = artifacts['model']
 scaler = artifacts['scaler']
 encoders = artifacts['encoders']
 features = artifacts['feature_columns']
+
 
 # 🔁 Step 4: Callback to handle predictions
 def predict_and_update(event):
