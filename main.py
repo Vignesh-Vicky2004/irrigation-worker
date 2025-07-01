@@ -111,7 +111,7 @@ def monitor_firebase_sensor_data():
 
     while True:
         try:
-            ref = db.reference("sensorData/raw")
+            ref = db.reference("sensorData")
             current = ref.get()
             
             print(f"📊 Current sensor data: {current}")
