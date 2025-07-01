@@ -124,4 +124,7 @@ def monitor_firebase_sensor_data():
         time.sleep(5)
 
 # ✅ Start background thread
-threading.Thread(target=monitor_firebase_sensor_data, daemon=True).start()
+@app.on_event("startup")
+def start_firebase_monitor():
+    print("✅ Starting Firebase monitor thread...")
+    threading.Thread(target=monitor_firebase_sensor_data, daemon=True).start()
