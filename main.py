@@ -1,33 +1,39 @@
+import os
+import json
 import firebase_admin
 from firebase_admin import credentials, db
 import joblib
 import numpy as np
 from datetime import datetime
+from dotenv import load_dotenv
+load_dotenv()
 import os
 
-# ----------------------------
-# Firebase + Model Setup
-# ----------------------------
-FIREBASE_KEY_PATH = "agri-hub-544be-firebase-adminsdk-fbsvc-b73789c99b.json"
-MODEL_PATH = "tamil_nadu_irrigation_model.pkl"
+# 🔐 Step 1: Load Firebase key from ENV variable
+FIREBASE_KEY_JSON = os.environ.get("FIREBASE_KEY_JSON")
 
-# Initialize Firebase
+if not FIREBASE_KEY_JSON:
+    raise Exception("FIREBASE_KEY_JSON not found in environment variables")
+
+with open("firebase_key.json", "w") as f:
+    f.write(FIREBASE_KEY_JSON)
+
+# 🔄 Step 2: Initialize Firebase
 if not firebase_admin._apps:
-    cred = credentials.Certificate(FIREBASE_KEY_PATH)
+    cred = credentials.Certificate("firebase_key.json")
     firebase_admin.initialize_app(cred, {
         'databaseURL': 'https://agri-hub-544be-default-rtdb.firebaseio.com'
     })
 
-# Load ML model
+# 📦 Step 3: Load model
+MODEL_PATH = "tamil_nadu_irrigation_model.pkl"
 artifacts = joblib.load(MODEL_PATH)
 model = artifacts['model']
 scaler = artifacts['scaler']
 encoders = artifacts['encoders']
 features = artifacts['feature_columns']
 
-# ----------------------------
-# Firebase Listener Callback
-# ----------------------------
+# 🔁 Step 4: Callback to handle predictions
 def predict_and_update(event):
     try:
         input_data = event.data
@@ -58,15 +64,18 @@ def predict_and_update(event):
             'season': 'southwest_monsoon'
         }
 
+        # Encode categoricals
         district_enc = encoders['le_district'].transform([full_input['district']])[0]
         zone_enc = encoders['le_zone'].transform([full_input['zone']])[0]
         season_enc = encoders['le_season'].transform([full_input['season']])[0]
 
+        # Derived features
         heat_stress = int(full_input['temperature_celsius'] > 35 and full_input['humidity_percent'] < 50)
         drought_stress = int(full_input['soil_moisture_percent'] < 30 and full_input['rainfall_mm_prediction_next_1h'] < 1)
         soil_temp_interaction = full_input['soil_moisture_percent'] * full_input['temperature_celsius']
         humidity_rain_interaction = full_input['humidity_percent'] * full_input['rainfall_mm_prediction_next_1h']
 
+        # Create final vector
         feature_vector = np.array([[
             full_input['soil_moisture_percent'],
             full_input['temperature_celsius'],
@@ -87,16 +96,15 @@ def predict_and_update(event):
         scaled_input = scaler.transform(feature_vector)
         irrigation_class = int(model.predict(scaled_input)[0])
 
+        # Push result back to Firebase
         db.reference('sensorData/prediction_class').set(irrigation_class)
         print(f"✅ Sent irrigation_class = {irrigation_class}")
 
     except Exception as e:
         print(f"❌ Error: {e}")
 
-# ----------------------------
-# Start Firebase Listener
-# ----------------------------
+# 🚀 Step 5: Listen forever
 if __name__ == "__main__":
-    print("🚀 Render worker started. Listening for sensorData...")
+    print("🚀 Firebase Irrigation Worker started on Render")
     sensor_ref = db.reference("sensorData")
     sensor_ref.listen(predict_and_update)

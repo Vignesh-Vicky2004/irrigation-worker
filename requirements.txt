@@ -2,3 +2,4 @@ firebase-admin==6.9.0
 joblib
 numpy
 scikit-learn
+python-dotenv
