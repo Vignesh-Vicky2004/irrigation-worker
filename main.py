@@ -2,17 +2,21 @@ import firebase_admin
 from firebase_admin import credentials, db
 import joblib
 import numpy as np
+import pandas as pd
+import time
 from datetime import datetime
+import os
 
-# 🔄 Step 1: Initialize Firebase from secret file injected by Render
+# 🔐 Step 1: Load Firebase credentials (Render injects this via Secret File)
 FIREBASE_KEY_PATH = "/opt/render/project/src/firebase_key.json"
 
-cred = credentials.Certificate(FIREBASE_KEY_PATH)
-firebase_admin.initialize_app(cred, {
-    'databaseURL': 'https://agri-hub-544be-default-rtdb.firebaseio.com'
-})
+if not firebase_admin._apps:
+    cred = credentials.Certificate(FIREBASE_KEY_PATH)
+    firebase_admin.initialize_app(cred, {
+        'databaseURL': 'https://agri-hub-544be-default-rtdb.firebaseio.com'
+    })
 
-# 📦 Step 2: Load model artifacts
+# 📦 Step 2: Load ML model and encoders
 MODEL_PATH = "tamil_nadu_irrigation_model.pkl"
 artifacts = joblib.load(MODEL_PATH)
 model = artifacts['model']
@@ -20,14 +24,9 @@ scaler = artifacts['scaler']
 encoders = artifacts['encoders']
 features = artifacts['feature_columns']
 
-
-# 🔁 Step 4: Callback to handle predictions
-def predict_and_update(event):
+# 🔁 Step 3: Prediction function
+def predict_and_update(input_data):
     try:
-        input_data = event.data
-        if input_data is None:
-            return
-
         print(f"\n📥 Received sensorData: {input_data}")
 
         humidity = input_data.get('humidity')
@@ -52,7 +51,7 @@ def predict_and_update(event):
             'season': 'southwest_monsoon'
         }
 
-        # Encode categoricals
+        # Encode categorical values
         district_enc = encoders['le_district'].transform([full_input['district']])[0]
         zone_enc = encoders['le_zone'].transform([full_input['zone']])[0]
         season_enc = encoders['le_season'].transform([full_input['season']])[0]
@@ -63,7 +62,7 @@ def predict_and_update(event):
         soil_temp_interaction = full_input['soil_moisture_percent'] * full_input['temperature_celsius']
         humidity_rain_interaction = full_input['humidity_percent'] * full_input['rainfall_mm_prediction_next_1h']
 
-        # Create final vector
+        # Create input vector
         feature_vector = np.array([[
             full_input['soil_moisture_percent'],
             full_input['temperature_celsius'],
@@ -81,18 +80,31 @@ def predict_and_update(event):
             humidity_rain_interaction
         ]])
 
-        scaled_input = scaler.transform(feature_vector)
+        df_input = pd.DataFrame(feature_vector, columns=features)
+        scaled_input = scaler.transform(df_input)
         irrigation_class = int(model.predict(scaled_input)[0])
 
-        # Push result back to Firebase
+        # Push prediction to Firebase
         db.reference('sensorData/prediction_class').set(irrigation_class)
         print(f"✅ Sent irrigation_class = {irrigation_class}")
 
     except Exception as e:
         print(f"❌ Error: {e}")
 
-# 🚀 Step 5: Listen forever
+# 🔄 Step 4: Polling loop to watch sensorData for changes
+def poll_sensor_data(interval=5):
+    print("🚀 Polling sensorData for updates every", interval, "seconds")
+    last_snapshot = None
+    while True:
+        try:
+            snapshot = db.reference("sensorData").get()
+            if snapshot and snapshot != last_snapshot:
+                last_snapshot = snapshot
+                predict_and_update(snapshot)
+        except Exception as e:
+            print(f"❌ Polling error: {e}")
+        time.sleep(interval)
+
+# 🚀 Start the polling worker
 if __name__ == "__main__":
-    print("🚀 Firebase Irrigation Worker started on Render")
-    sensor_ref = db.reference("sensorData")
-    sensor_ref.listen(predict_and_update)
+    poll_sensor_data()
