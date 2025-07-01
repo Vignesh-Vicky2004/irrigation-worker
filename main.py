@@ -1,5 +1,7 @@
 import os
 import json
+import threading
+import time
 from datetime import datetime
 
 import firebase_admin
@@ -30,12 +32,13 @@ encoders = artifacts['encoders']
 # ✅ FastAPI app
 app = FastAPI()
 
+# ✅ Data model
 class SensorData(BaseModel):
     humidity: float
     temperature: float
     soilMoisture: float
 
-@app.post("/predict")
+# ✅ Prediction function (reused in both API and thread)
 def predict_irrigation(data: SensorData):
     try:
         now = datetime.now()
@@ -52,18 +55,15 @@ def predict_irrigation(data: SensorData):
             'season': 'southwest_monsoon'
         }
 
-        # Encode categorical features
         district_enc = encoders['le_district'].transform([full_input['district']])[0]
         zone_enc = encoders['le_zone'].transform([full_input['zone']])[0]
         season_enc = encoders['le_season'].transform([full_input['season']])[0]
 
-        # Interaction features
         heat_stress = int(full_input['temperature_celsius'] > 35 and full_input['humidity_percent'] < 50)
         drought_stress = int(full_input['soil_moisture_percent'] < 30 and full_input['rainfall_mm_prediction_next_1h'] < 1)
         soil_temp_interaction = full_input['soil_moisture_percent'] * full_input['temperature_celsius']
         humidity_rain_interaction = full_input['humidity_percent'] * full_input['rainfall_mm_prediction_next_1h']
 
-        # Construct feature vector
         feature_vector = np.array([[
             full_input['soil_moisture_percent'],
             full_input['temperature_celsius'],
@@ -81,13 +81,47 @@ def predict_irrigation(data: SensorData):
             humidity_rain_interaction
         ]])
 
-        # Predict and send to Firebase
         scaled_input = scaler.transform(feature_vector)
         irrigation_class = int(model.predict(scaled_input)[0])
 
+        # Update Firebase
         db.reference('sensorData/prediction_class').set(irrigation_class)
 
         return {"irrigation_class": irrigation_class}
-
     except Exception as e:
         return {"error": str(e)}
+
+# ✅ API route
+@app.post("/predict")
+def predict_route(data: SensorData):
+    return predict_irrigation(data)
+
+# ✅ Background thread for automatic updates
+def monitor_firebase_sensor_data():
+    last_values = {}
+
+    while True:
+        try:
+            ref = db.reference("sensorData/raw")
+            current = ref.get()
+
+            if current != last_values:
+                print("Detected change in sensor data:", current)
+                last_values = current.copy() if current else {}
+
+                if current:
+                    data = SensorData(
+                        humidity=current.get("humidity", 0.0),
+                        temperature=current.get("temperature", 0.0),
+                        soilMoisture=current.get("soilMoisture", 0.0)
+                    )
+                    result = predict_irrigation(data)
+                    print("Predicted irrigation class:", result)
+
+        except Exception as e:
+            print("Error while monitoring sensor data:", e)
+
+        time.sleep(5)
+
+# ✅ Start background thread
+threading.Thread(target=monitor_firebase_sensor_data, daemon=True).start()
