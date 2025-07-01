@@ -1,48 +1,50 @@
-import firebase_admin
-from firebase_admin import credentials, db
-import joblib
-import numpy as np
+# app/main.py
+
+import os
+import json
 from datetime import datetime
 
-# 🔄 Step 1: Initialize Firebase from secret file injected by Render
-FIREBASE_KEY_PATH = "/opt/render/project/src/firebase_key.json"
+import firebase_admin
+from firebase_admin import credentials, db
 
-cred = credentials.Certificate(FIREBASE_KEY_PATH)
+import joblib
+import numpy as np
+
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+# ✅ Firebase Init from JSON string in ENV variable
+firebase_key_json = os.environ["FIREBASE_KEY_JSON"]
+firebase_cred_dict = json.loads(firebase_key_json)
+
+cred = credentials.Certificate(firebase_cred_dict)
 firebase_admin.initialize_app(cred, {
     'databaseURL': 'https://agri-hub-544be-default-rtdb.firebaseio.com'
 })
 
-# 📦 Step 2: Load model artifacts
+# ✅ Load Model
 MODEL_PATH = "tamil_nadu_irrigation_model.pkl"
 artifacts = joblib.load(MODEL_PATH)
 model = artifacts['model']
 scaler = artifacts['scaler']
 encoders = artifacts['encoders']
-features = artifacts['feature_columns']
 
+# ✅ FastAPI Init
+app = FastAPI()
 
-# 🔁 Step 4: Callback to handle predictions
-def predict_and_update(event):
+class SensorData(BaseModel):
+    humidity: float
+    temperature: float
+    soilMoisture: float
+
+@app.post("/predict")
+def predict_irrigation(data: SensorData):
     try:
-        input_data = event.data
-        if input_data is None:
-            return
-
-        print(f"\n📥 Received sensorData: {input_data}")
-
-        humidity = input_data.get('humidity')
-        temperature = input_data.get('temperature')
-        soil_moisture = input_data.get('soilMoisture')
-
-        if None in (humidity, temperature, soil_moisture):
-            print("❌ Missing required fields")
-            return
-
         now = datetime.now()
         full_input = {
-            'soil_moisture_percent': float(soil_moisture),
-            'temperature_celsius': float(temperature),
-            'humidity_percent': float(humidity),
+            'soil_moisture_percent': data.soilMoisture,
+            'temperature_celsius': data.temperature,
+            'humidity_percent': data.humidity,
             'rainfall_mm_prediction_next_1h': 0.5,
             'hour': now.hour,
             'day_of_year': now.timetuple().tm_yday,
@@ -52,7 +54,7 @@ def predict_and_update(event):
             'season': 'southwest_monsoon'
         }
 
-        # Encode categoricals
+        # Encode categorical fields
         district_enc = encoders['le_district'].transform([full_input['district']])[0]
         zone_enc = encoders['le_zone'].transform([full_input['zone']])[0]
         season_enc = encoders['le_season'].transform([full_input['season']])[0]
@@ -63,7 +65,7 @@ def predict_and_update(event):
         soil_temp_interaction = full_input['soil_moisture_percent'] * full_input['temperature_celsius']
         humidity_rain_interaction = full_input['humidity_percent'] * full_input['rainfall_mm_prediction_next_1h']
 
-        # Create final vector
+        # Feature vector
         feature_vector = np.array([[
             full_input['soil_moisture_percent'],
             full_input['temperature_celsius'],
@@ -84,15 +86,10 @@ def predict_and_update(event):
         scaled_input = scaler.transform(feature_vector)
         irrigation_class = int(model.predict(scaled_input)[0])
 
-        # Push result back to Firebase
+        # Save result to Firebase
         db.reference('sensorData/prediction_class').set(irrigation_class)
-        print(f"✅ Sent irrigation_class = {irrigation_class}")
+
+        return {"irrigation_class": irrigation_class}
 
     except Exception as e:
-        print(f"❌ Error: {e}")
-
-# 🚀 Step 5: Listen forever
-if __name__ == "__main__":
-    print("🚀 Firebase Irrigation Worker started on Render")
-    sensor_ref = db.reference("sensorData")
-    sensor_ref.listen(predict_and_update)
+        return {"error": str(e)}
