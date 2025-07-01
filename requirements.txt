@@ -1,6 +1,6 @@
-firebase-admin==6.9.0
-joblib
+fastapi
+uvicorn
+firebase-admin
 numpy
 scikit-learn
-python-dotenv
-pandas
+joblib
