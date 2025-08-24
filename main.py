@@ -2,6 +2,7 @@ import os
 import json
 import threading
 import time
+import warnings
 from datetime import datetime
 
 import firebase_admin
@@ -12,6 +13,9 @@ import numpy as np
 
 from fastapi import FastAPI
 from pydantic import BaseModel
+
+# Suppress sklearn warnings
+warnings.filterwarnings("ignore", message="X does not have valid feature names")
 
 # ✅ Load Firebase credentials from env
 firebase_key_json = os.environ["FIREBASE_KEY_JSON"]
@@ -30,13 +34,28 @@ scaler = artifacts['scaler']
 encoders = artifacts['encoders']
 
 # ✅ FastAPI app
-app = FastAPI()
+app = FastAPI(title="Tamil Nadu Irrigation Prediction API", version="1.0.0")
 
 # ✅ Data model
 class SensorData(BaseModel):
     humidity: float
     temperature: float
     soilMoisture: float
+
+# ✅ Root endpoint (fixes 404 error)
+@app.get("/")
+def root():
+    return {
+        "message": "Tamil Nadu Irrigation Prediction API", 
+        "status": "active",
+        "version": "1.0.0",
+        "endpoints": {
+            "health": "/health",
+            "predict": "/predict", 
+            "trigger": "/trigger-prediction",
+            "docs": "/docs"
+        }
+    }
 
 # ✅ Prediction function (reused in both API and thread)
 def predict_irrigation(data: SensorData):
@@ -103,7 +122,7 @@ def predict_route(data: SensorData):
 
 # ✅ Improved background thread with better change detection
 def monitor_firebase_sensor_data():
-    last_values = None
+    last_sensor_values = None  # Only track sensor data, not metadata
     consecutive_errors = 0
     max_errors = 5
 
@@ -114,47 +133,50 @@ def monitor_firebase_sensor_data():
             ref = db.reference("sensorData")
             current = ref.get()
             
-            print(f"📊 Current sensor data: {current}")
-            
-            # More robust change detection
             if current is not None:
-                # Check if data actually changed (handle None vs empty dict)
-                data_changed = (
-                    last_values is None or 
-                    current != last_values or
-                    not last_values  # Handle empty dict case
+                # Extract only sensor data for comparison (ignore timestamps, predictions, etc.)
+                current_sensor_data = {
+                    'humidity': current.get('humidity'),
+                    'temperature': current.get('temperature'), 
+                    'soilMoisture': current.get('soilMoisture')
+                }
+                
+                # Check if sensor data actually changed
+                sensor_data_changed = (
+                    last_sensor_values is None or 
+                    current_sensor_data != last_sensor_values
                 )
                 
-                if data_changed:
-                    print("🔔 Detected change in sensor data!")
-                    print(f"   Previous: {last_values}")
-                    print(f"   Current:  {current}")
+                if sensor_data_changed:
+                    print("🔔 Detected change in SENSOR data!")
+                    print(f"   Previous sensor data: {last_sensor_values}")
+                    print(f"   Current sensor data:  {current_sensor_data}")
                     
                     # Validate data before processing
                     required_fields = ['humidity', 'temperature', 'soilMoisture']
-                    if all(field in current for field in required_fields):
+                    if all(field in current_sensor_data and current_sensor_data[field] is not None for field in required_fields):
                         try:
                             data = SensorData(
-                                humidity=float(current.get("humidity", 0.0)),
-                                temperature=float(current.get("temperature", 0.0)),
-                                soilMoisture=float(current.get("soilMoisture", 0.0))
+                                humidity=float(current_sensor_data["humidity"]),
+                                temperature=float(current_sensor_data["temperature"]),
+                                soilMoisture=float(current_sensor_data["soilMoisture"])
                             )
                             result = predict_irrigation(data)
                             print(f"✅ Prediction result: {result}")
                             
-                            # Update last_values after successful processing
-                            last_values = current.copy()
+                            # Update last_sensor_values after successful processing
+                            last_sensor_values = current_sensor_data.copy()
                             consecutive_errors = 0  # Reset error counter
                             
                         except (ValueError, TypeError) as e:
                             print(f"❌ Data validation error: {e}")
-                            print(f"   Raw data: {current}")
+                            print(f"   Raw sensor data: {current_sensor_data}")
                     else:
-                        missing_fields = [f for f in required_fields if f not in current]
-                        print(f"❌ Missing required fields: {missing_fields}")
-                        print(f"   Available fields: {list(current.keys())}")
+                        missing_fields = [f for f in required_fields if f not in current_sensor_data or current_sensor_data[f] is None]
+                        print(f"❌ Missing/null required fields: {missing_fields}")
+                        print(f"   Available sensor data: {current_sensor_data}")
                 else:
-                    print("📊 No change detected in sensor data")
+                    print("📊 No change in sensor data (ignoring metadata updates)")
             else:
                 print("⚠️  No sensor data found in Firebase")
                 
@@ -168,55 +190,18 @@ def monitor_firebase_sensor_data():
 
         time.sleep(5)
 
-# Alternative: Using Firebase listeners (more efficient)
-def setup_firebase_listener():
-    """
-    Alternative approach using Firebase real-time listeners
-    This is more efficient than polling every 5 seconds
-    """
-    def sensor_data_listener(event):
-        try:
-            print(f"🔔 Firebase listener triggered: {event.event_type}")
-            print(f"📊 New data: {event.data}")
-            
-            if event.data and event.event_type in ['put', 'patch']:
-                required_fields = ['humidity', 'temperature', 'soilMoisture']
-                if all(field in event.data for field in required_fields):
-                    data = SensorData(
-                        humidity=float(event.data.get("humidity", 0.0)),
-                        temperature=float(event.data.get("temperature", 0.0)),
-                        soilMoisture=float(event.data.get("soilMoisture", 0.0))
-                    )
-                    result = predict_irrigation(data)
-                    print(f"✅ Listener prediction result: {result}")
-                else:
-                    print(f"❌ Listener: Missing required fields in data: {event.data}")
-                    
-        except Exception as e:
-            print(f"❌ Firebase listener error: {e}")
-
-    # Set up the listener
-    ref = db.reference("sensorData/raw")
-    ref.listen(sensor_data_listener)
-    print("🎧 Firebase real-time listener set up")
-
-# ✅ Start background monitoring (choose one method)
+# ✅ Start background monitoring
 @app.on_event("startup")
 def start_firebase_monitor():
     print("🚀 Starting Firebase monitoring...")
-    
-    # Option 1: Use polling method (your current approach, improved)
     threading.Thread(target=monitor_firebase_sensor_data, daemon=True).start()
-    
-    # Option 2: Use real-time listeners (more efficient, uncomment to use)
-    # setup_firebase_listener()
 
-# ✅ Health check endpoint
+# ✅ Health check endpoint (fixed path consistency)
 @app.get("/health")
 def health_check():
     try:
-        # Test Firebase connection
-        test_ref = db.reference("sensorData/raw")
+        # Test Firebase connection - use same path as monitoring
+        test_ref = db.reference("sensorData")
         current_data = test_ref.get()
         
         return {
@@ -233,14 +218,14 @@ def health_check():
             "timestamp": datetime.now().isoformat()
         }
 
-# ✅ Manual trigger endpoint for testing
+# ✅ Manual trigger endpoint (fixed path consistency)
 @app.post("/trigger-prediction")
 def trigger_prediction():
     try:
-        ref = db.reference("sensorData/raw")
+        ref = db.reference("sensorData")  # Use consistent path
         current_data = ref.get()
         
-        if current_data:
+        if current_data and all(field in current_data for field in ['humidity', 'temperature', 'soilMoisture']):
             data = SensorData(
                 humidity=float(current_data.get("humidity", 0.0)),
                 temperature=float(current_data.get("temperature", 0.0)),
@@ -249,7 +234,7 @@ def trigger_prediction():
             result = predict_irrigation(data)
             return {"status": "success", "result": result, "input_data": current_data}
         else:
-            return {"status": "error", "message": "No sensor data found"}
+            return {"status": "error", "message": "No valid sensor data found"}
             
     except Exception as e:
         return {"status": "error", "message": str(e)}
